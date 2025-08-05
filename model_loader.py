@@ -31,7 +31,7 @@ class QwenImageModelLoader:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "torch_dtype": (["bfloat16", "float16", "float32"], {
+                "torch_dtype": (["bfloat16", "float16", "float32", "fp8"], {
                     "default": "bfloat16"
                 }),
                 "device": (["auto", "cuda", "cpu"], {
@@ -90,6 +90,13 @@ class QwenImageModelLoader:
             "scheduler/scheduler_config.json"
         ]
         
+        # Check for safetensors files
+        safetensors_files = []
+        for root, dirs, files in os.walk(local_path):
+            for file in files:
+                if file.endswith('.safetensors'):
+                    safetensors_files.append(os.path.join(root, file))
+        
         missing_files = []
         for file in required_files:
             file_path = os.path.join(local_path, file)
@@ -99,6 +106,19 @@ class QwenImageModelLoader:
         if missing_files:
             return False, f"Missing required files: {', '.join(missing_files)}"
         
+        # Log safetensors files found
+        if safetensors_files:
+            print(f"📦 Found {len(safetensors_files)} safetensors files")
+            total_size = sum(os.path.getsize(f) for f in safetensors_files)
+            print(f"  Total size: {total_size / (1024**3):.2f} GB")
+            for file in safetensors_files[:5]:  # Show first 5 files
+                size_mb = os.path.getsize(file) / (1024**2)
+                print(f"  - {os.path.basename(file)} ({size_mb:.1f} MB)")
+            if len(safetensors_files) > 5:
+                print(f"  ... and {len(safetensors_files) - 5} more")
+        else:
+            print("⚠️  No safetensors files found - will use alternative format")
+        
         return True, local_path
     
     def get_torch_dtype(self, dtype_str):
@@ -106,8 +126,23 @@ class QwenImageModelLoader:
         dtype_map = {
             "bfloat16": torch.bfloat16,
             "float16": torch.float16,
-            "float32": torch.float32
+            "float32": torch.float32,
+            "fp8": torch.float8_e4m3fn
         }
+        
+        # Special handling for fp8
+        if dtype_str == "fp8":
+            try:
+                # Check if fp8 is supported
+                if hasattr(torch, 'float8_e4m3fn'):
+                    return torch.float8_e4m3fn
+                else:
+                    print("⚠️  FP8 not supported in this PyTorch version, falling back to bfloat16")
+                    return torch.bfloat16
+            except Exception as e:
+                print(f"⚠️  FP8 support error: {e}, falling back to bfloat16")
+                return torch.bfloat16
+        
         return dtype_map.get(dtype_str, torch.bfloat16)
     
     def get_device(self, device_str):
@@ -220,12 +255,27 @@ class QwenImageModelLoader:
             else:
                 print("🌐 Downloading/loading model weights from online...")
             
+            # Special handling for fp8 dtype
+            if torch_dtype == "fp8":
+                print("🔧 Using FP8 precision - this may require specific hardware support")
+                # For fp8, we might need to set additional parameters
+                load_kwargs = {
+                    "torch_dtype": actual_torch_dtype,
+                    "trust_remote_code": True,
+                    "use_safetensors": True,
+                    "local_files_only": is_local
+                }
+            else:
+                load_kwargs = {
+                    "torch_dtype": actual_torch_dtype,
+                    "trust_remote_code": True,
+                    "use_safetensors": True,
+                    "local_files_only": is_local
+                }
+            
             pipeline = DiffusionPipeline.from_pretrained(
                 actual_model_path,
-                torch_dtype=actual_torch_dtype,
-                trust_remote_code=True,
-                use_safetensors=True,
-                local_files_only=is_local
+                **load_kwargs
             )
             
             print("🔧 Model weights loaded, applying optimizations...")
@@ -257,7 +307,7 @@ class QwenImageModelLoader:
             print(error_msg)
             raise ImportError(error_msg)
         except Exception as e:
-            error_msg = f"Loading Qwen-Image model failed: {str(e)}\n\nSolutions:\n1. Check if local model files are complete\n2. Upgrade diffusers: pip install git+https://github.com/huggingface/diffusers\n3. Ensure sufficient GPU memory"
+            error_msg = f"Loading Qwen-Image model failed: {str(e)}\n\nSolutions:\n1. Check if local model files are complete\n2. Upgrade diffusers: pip install git+https://github.com/huggingface/diffusers\n3. Ensure sufficient GPU memory\n4. For FP8: Ensure your hardware supports FP8 precision\n5. For safetensors: Ensure all .safetensors files are properly downloaded"
             print(error_msg)
             raise Exception(error_msg)
 
